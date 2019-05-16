@@ -3432,6 +3432,8 @@ static void PlugInFromRoutePoint(PlugIn_Waypoint *dst, /* const*/ RoutePoint *sr
 {
     dst->m_lat = src->m_lat;
     dst->m_lon = src->m_lon;
+    dst->m_speed = src->GetPlannedSpeed();
+    dst->m_course = src->GetCourse();
     dst->m_IconName = src->GetIconName();
     dst->m_MarkName = src->GetName(  );
     dst->m_MarkDescription = src->m_MarkDescription;
