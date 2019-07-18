@@ -8702,6 +8702,15 @@ wxString GetSelectedRouteGUID_Plugin( )
     return wxEmptyString;
 }
 
+wxString GetActiveRouteGUID_Plugin( )
+{
+    ChartCanvas *cc = gFrame->GetFocusCanvas();
+    if (cc && cc->GetActiveRoute() ) {
+        return cc->GetActiveRoute()->m_GUID;
+    }
+    return wxEmptyString;
+}
+
 wxString GetSelectedTrackGUID_Plugin( )
 {
     ChartCanvas *cc = gFrame->GetFocusCanvas();

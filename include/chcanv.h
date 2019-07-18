@@ -420,6 +420,7 @@ public:
       int GetMinAvailableGshhgQuality() { return pWorldBackgroundChart->GetMinAvailableQuality(); }
       int GetMaxAvailableGshhgQuality() { return pWorldBackgroundChart->GetMaxAvailableQuality(); }
       Route  *GetSelectedRoute() const { return m_pSelectedRoute; }
+      Route  *GetActiveRoute() const;
       Track  *GetSelectedTrack() const { return m_pSelectedTrack; }
       RoutePoint  *GetSelectedRoutePoint() const { return m_pFoundRoutePoint; }
 

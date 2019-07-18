@@ -955,6 +955,10 @@ ChartCanvas::~ChartCanvas()
     delete m_pQuilt;
 }
 
+Route* ChartCanvas::GetActiveRoute() const {
+    return g_pRouteMan->GetpActiveRoute();
+}
+
 void ChartCanvas::CanvasApplyLocale()
 {
     CreateDepthUnitEmbossMaps( m_cs );
