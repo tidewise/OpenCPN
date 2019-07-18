@@ -8740,6 +8740,7 @@ std::unique_ptr<PlugIn_Route> GetRoute_Plugin( const wxString& GUID)
    // PlugIn_Waypoint *pwp;
    RoutePoint *src_wp;
    wxRoutePointListNode *node = route->pRoutePointList->GetFirst();
+   dst_route->m_PlannedSpeed = route->m_PlannedSpeed;
 
    while( node ) {
         src_wp = node->GetData();
