@@ -36,11 +36,13 @@
 #include "wx/tokenzr.h"
 #include "wx/dir.h"
 
+#include "config.h"
 #include "chartdb.h"
 #include "chartimg.h"
 #include "chart1.h"
 #include "thumbwin.h"
 #include "mbtiles.h"
+#include "CanvasConfig.h"
 
 #ifdef ocpnUSE_GL
 #include "glChartCanvas.h"
@@ -53,10 +55,8 @@
 
 #include "chcanv.h"
 
-#ifdef USE_S57
 #include "s57chart.h"
 #include "cm93.h"
-#endif
 
 extern ColorScheme GetColorScheme();
 
@@ -65,13 +65,16 @@ class s52plib;
 extern ThumbWin     *pthumbwin;
 extern int          g_nCacheLimit;
 extern int          g_memCacheLimit;
-extern bool         g_bopengl;
 extern s52plib      *ps52plib;
 extern ChartDB      *ChartData;
+extern std::vector<int>      g_quilt_noshow_index_array;
+extern std::vector<int>      g_quilt_yesshow_index_array;
+extern int          g_canvasConfig;
+extern arrayofCanvasConfigPtr g_canvasConfigArray;
+
 
 bool G_FloatPtInPolygon(MyFlPoint *rgpts, int wnumpts, float x, float y) ;
 bool GetMemoryStatus(int *mem_total, int *mem_used);
-
 
 // ============================================================================
 // ChartStack implementation
@@ -244,6 +247,10 @@ ChartDB::ChartDB()
             msg.Printf(_T("ChartDB Cache policy:  Max open chart limit is %d."), g_nCacheLimit);
             wxLogMessage(msg);
       }
+      
+      m_checkGroupIndex[0] = m_checkGroupIndex[1] = -1;
+      m_checkedTileOnly[0] = m_checkedTileOnly[1] = false;
+
 
 }
 
@@ -300,7 +307,7 @@ void ChartDB::DeleteCacheEntry(int i, bool bDelTexture, const wxString &msg)
 void ChartDB::PurgeCache()
 {
 //    Empty the cache
-      wxLogMessage(_T("Chart cache purge"));
+      //wxLogMessage(_T("Chart cache purge"));
 
       if( wxMUTEX_NO_ERROR == m_cache_mutex.Lock() ){
         unsigned int nCache = pChartCache->GetCount();
@@ -477,19 +484,16 @@ ChartBase *ChartDB::GetChart(const wxChar *theFilePath, ChartClassDescriptor &ch
       else if (chartExt == wxT("MBTILES")) {
             pch = new ChartMBTiles;
       }
-#ifdef USE_S57
       else if (chartExt == wxT("000") || chartExt == wxT("S57")) {
             LoadS57();
             pch = new s57chart;
       }
-#endif
       else if (chart_desc.m_descriptor_type == PLUGIN_DESCRIPTOR) {
             LoadS57();
             ChartPlugInWrapper *cpiw = new ChartPlugInWrapper(chart_desc.m_class_name);
             pch = (ChartBase *)cpiw;
       }
 
-#ifdef USE_S57
       else
       {
             wxRegEx rxName(wxT("[0-9]+"));
@@ -502,7 +506,6 @@ ChartBase *ChartDB::GetChart(const wxChar *theFilePath, ChartClassDescriptor &ch
                         pch = new cm93compchart;
             }
       }
-#endif
 
       return pch;
 }
@@ -752,6 +755,43 @@ bool ChartDB::IsENCInGroup(const int groupIndex)
       return retVal;
 }
 
+bool ChartDB::IsNonMBTileInGroup(const int groupIndex)
+{
+    // Walk the database, looking in specified group for anything other than MBTile
+    // Return true if so.
+      bool retVal = false;
+      
+      for(int db_index=0 ; db_index<GetChartTableEntries() ; db_index++){
+            const ChartTableEntry &cte = GetChartTableEntry(db_index);
+            
+            //    Check to see if the candidate chart is in the currently active group
+            bool b_group_add = false;
+            if(groupIndex > 0)
+            {
+                  const int ng = cte.GetGroupArray().size();
+                  for(int ig=0 ; ig < ng; ig++){
+                      if(groupIndex == cte.GetGroupArray()[ig]){
+                              b_group_add = true;
+                              break;
+                      }
+                  }
+            }
+            else
+                  b_group_add = true;
+
+    
+            if(b_group_add){
+                if(cte.GetChartType() != CHART_TYPE_MBTILES){
+                    retVal = true;
+                    break;   // the outer for loop
+                }
+            }
+      }
+      
+      return retVal;
+}
+
+
 //-------------------------------------------------------------------
 //    Check to see it lat/lon is within a database chart at index
 //-------------------------------------------------------------------
@@ -842,9 +882,7 @@ bool ChartDB::CopyStack(ChartStack *pa, ChartStack *pb)
 wxString ChartDB::GetFullPath(ChartStack *ps, int stackindex)
 {
       int dbIndex = ps->GetDBIndex(stackindex);
-      wxASSERT( dbIndex >= 0 );
-
-      return wxString(GetChartTableEntry(dbIndex).GetpFullPath(),  wxConvUTF8);
+      return GetChartTableEntry(dbIndex).GetFullSystemPath();
 }
 
 //-------------------------------------------------------------------
@@ -895,11 +933,8 @@ int ChartDB::GetStackEntry(ChartStack *ps, wxString fp)
 {
       for(int i=0 ; i<ps->nEntry ; i++)
       {
-            int dbindex = ps->GetDBIndex( i );
-            wxASSERT(dbindex >= 0);
-
-            const ChartTableEntry &entry = GetChartTableEntry( dbindex );
-            if(fp.IsSameAs( wxString(entry.GetpFullPath(),  wxConvUTF8)) )
+            const ChartTableEntry &entry = GetChartTableEntry(ps->GetDBIndex(i));
+            if(fp.IsSameAs( entry.GetFullSystemPath()) )
                   return i;
       }
 
@@ -1140,8 +1175,10 @@ CacheEntry *ChartDB::FindOldestDeleteCandidate( bool blog)
             {
                 CacheEntry *pce = (CacheEntry *)(pChartCache->Item(i));
                 if(pce->RecentTime < LRUTime && !pce->n_lock){
-                    LRUTime = pce->RecentTime;
-                    iOldest = i;
+                    if (!isSingleChart((ChartBase *)(pce->pChart))) {
+                       LRUTime = pce->RecentTime;
+                       iOldest = i;
+                    }
                 }
             }
             int dt = m_ticks - LRUTime;
@@ -1149,7 +1186,7 @@ CacheEntry *ChartDB::FindOldestDeleteCandidate( bool blog)
             CacheEntry *pce = (CacheEntry *)(pChartCache->Item(iOldest));
             ChartBase *pDeleteCandidate =  (ChartBase *)(pce->pChart);
                 
-            if( (!pce->n_lock) ){
+            if( !pce->n_lock &&  !isSingleChart(pDeleteCandidate)){
                 if(blog)
                     wxLogMessage(_T("Oldest unlocked cache index is %d, delta t is %d"), iOldest, dt);
                 
@@ -1174,7 +1211,7 @@ ChartBase *ChartDB::OpenChartUsingCache(int dbindex, ChartInitFlag init_flag)
 //      printf("Opening chart %d   lock: %d\n", dbindex, m_b_locked);
 
       const ChartTableEntry &cte = GetChartTableEntry(dbindex);
-      wxString ChartFullPath(cte.GetpFullPath(), wxConvUTF8 );
+      wxString ChartFullPath = cte.GetFullSystemPath();
       ChartTypeEnum chart_type = (ChartTypeEnum)cte.GetChartType();
       ChartFamilyEnum chart_family = (ChartFamilyEnum)cte.GetChartFamily();
       
@@ -1319,7 +1356,6 @@ ChartBase *ChartDB::OpenChartUsingCache(int dbindex, ChartInitFlag init_flag)
             else if(chart_type == CHART_TYPE_MBTILES)
                 Ch = new ChartMBTiles();
             
-#ifdef USE_S57
             else if(chart_type == CHART_TYPE_S57)
             {
                   LoadS57();
@@ -1337,9 +1373,7 @@ ChartBase *ChartDB::OpenChartUsingCache(int dbindex, ChartInitFlag init_flag)
                   ext.ELON = cte.GetLonMax();
                   Chs57->SetFullExtent(ext);
             }
-#endif
 
-#ifdef USE_S57
             else if(chart_type == CHART_TYPE_CM93)
             {
                   LoadS57();
@@ -1376,7 +1410,6 @@ ChartBase *ChartDB::OpenChartUsingCache(int dbindex, ChartInitFlag init_flag)
                   ext.ELON = cte.GetLonMax();
                   Chcm93->SetFullExtent(ext);
             }
-#endif
 
             else if(chart_type == CHART_TYPE_PLUGIN)
             {
@@ -1433,11 +1466,7 @@ ChartBase *ChartDB::OpenChartUsingCache(int dbindex, ChartInitFlag init_flag)
             {
                   InitReturn ir;
                   
-#ifdef USE_S57
                   s52plib *plib = ps52plib;
-#else
-                  s52plib *plib = NULL;
-#endif                  
                   wxString msg_fn(ChartFullPath);
                   msg_fn.Replace(_T("%"), _T("%%"));
 
@@ -1480,6 +1509,27 @@ ChartBase *ChartDB::OpenChartUsingCache(int dbindex, ChartInitFlag init_flag)
                               else {
                                 delete pce;
                               }
+                        }
+                        
+                        //  A performance optimization.
+                        //  Hide this chart's MBTiles overlay on initial MBTile chart load, or reload after cache purge.
+                        //  This can help avoid excessively long startup and group switch time when large tilesets are in use.
+                        //  See FS#2601
+                        //  Further optimization:
+                        //  If any chart group being shown contains only MBTiles, and the target file is less than 5 GB in size,
+                        //   then allow immediate opening.  Otherwise, add this chart to the "no-show" array.
+                        if(chart_type == CHART_TYPE_MBTILES){
+                            wxFileName tileFile(ChartFullPath);
+                            wxULongLong tileSize = tileFile.GetSize();
+                            if(!CheckAnyCanvasExclusiveTileGroup() || (tileSize > 5e9)){
+                                // Check to see if the tile has been "clicked".
+                                // If so, do not add to no-show array again.
+                                if(std::find(g_quilt_yesshow_index_array.begin(), g_quilt_yesshow_index_array.end(), dbindex) == g_quilt_yesshow_index_array.end()) {
+                                    if(std::find(g_quilt_noshow_index_array.begin(), g_quilt_noshow_index_array.end(), dbindex) == g_quilt_noshow_index_array.end()) {
+                                        g_quilt_noshow_index_array.push_back( dbindex );
+                                    }
+                                }
+                            }
                         }
                   }
                   else if(INIT_FAIL_REMOVE == ir)                 // some problem in chart Init()
@@ -1525,8 +1575,8 @@ bool ChartDB::DeleteCacheChart(ChartBase *pDeleteCandidate)
     bool retval = false;
     
     if( wxMUTEX_NO_ERROR == m_cache_mutex.Lock() ){
-        
-
+       if(!isSingleChart(pDeleteCandidate))
+       {
             // Find the chart in the cache
             CacheEntry *pce = NULL;
             for(unsigned int i=0 ; i< pChartCache->GetCount() ; i++)
@@ -1548,7 +1598,7 @@ bool ChartDB::DeleteCacheChart(ChartBase *pDeleteCandidate)
                       retval = true;
                   }
             }
-      
+      }
       m_cache_mutex.Unlock();
     }
 
@@ -1773,8 +1823,6 @@ wxXmlDocument ChartDB::GetXMLDescription(int dbIndex, bool b_getGeom)
                   node->AddChild ( tnode );
             }
 
-#ifdef USE_S57
-            
             s57chart *pcs57 = dynamic_cast<s57chart*>(pc);
             if(pcs57)
             {
@@ -1799,7 +1847,6 @@ wxXmlDocument ChartDB::GetXMLDescription(int dbIndex, bool b_getGeom)
                   node->AddChild ( tnode );
 
             }
-#endif            
       }
 
 
@@ -1894,8 +1941,89 @@ wxXmlDocument ChartDB::GetXMLDescription(int dbIndex, bool b_getGeom)
       return doc;
 }
 
+bool ChartDB::CheckExclusiveTileGroup( int canvasIndex )
+{
+    // Return true if the group active in the passed canvasIndex has only MBTiles present
+    // Also, populate the persistent member variables, so that subsequent checks are very fast.
+    
+    // Get the chart canvas indexed by canvasIndex
+    canvasConfig *cc;
+    ChartCanvas *canvas = NULL;
+    switch(g_canvasConfig){
+        case 1:
+            if(canvasIndex == 0){
+                cc = g_canvasConfigArray.Item(0);
+                if(cc )
+                    canvas = cc->canvas;
+            }
+            else{
+                cc = g_canvasConfigArray.Item(1);
+                if(cc )
+                    canvas = cc->canvas;
+            }
+            break;
+            
+        default:
+            cc = g_canvasConfigArray.Item(0);
+            if(cc )
+                canvas = cc->canvas;
+    }
+    
+    if(!canvas)
+        return false;
+    
+    // This canvas group index already checked?
+    if(canvas->m_groupIndex == m_checkGroupIndex[canvasIndex])
+        return m_checkedTileOnly[canvasIndex];
+        
+    // Check the group for anything other than MBTiles...
+    bool rv = IsNonMBTileInGroup(canvas->m_groupIndex);
+    
+    m_checkGroupIndex[canvasIndex] = canvas->m_groupIndex;
+    m_checkedTileOnly[canvasIndex] = !rv;
+    
+    return !rv;                 // true iff group has only MBTiles
 
+}
+    
+bool ChartDB::CheckAnyCanvasExclusiveTileGroup( )
+{
+    // Check to determine if any canvas group is exclusively MBTiles
+    // if so, return true;
+    
+    bool rv = false;
+    
+    canvasConfig *cc;
+    ChartCanvas *canvas = NULL;
+    switch(g_canvasConfig){
+        case 1:
+            cc = g_canvasConfigArray.Item(0);
+            if(cc ){
+                ChartCanvas *canvas = cc->canvas;
+                if(canvas->m_groupIndex == m_checkGroupIndex[0])
+                    rv |= m_checkedTileOnly[0];
+            }
 
+            cc = g_canvasConfigArray.Item(1);
+            if(cc ){
+                ChartCanvas *canvas = cc->canvas;
+                if(canvas->m_groupIndex == m_checkGroupIndex[1])
+                    rv |= m_checkedTileOnly[1];
+            }
+            break;
+            
+        default:
+            cc = g_canvasConfigArray.Item(0);
+            if(cc ){
+                ChartCanvas *canvas = cc->canvas;
+                if(canvas->m_groupIndex == m_checkGroupIndex[0])
+                    rv |= m_checkedTileOnly[0];
+            }
+
+    }
+    
+    return rv;
+}
 
 
 //  Private version of PolyPt testing using floats instead of doubles
